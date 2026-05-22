@@ -68,23 +68,20 @@ class WorkflowExecutionService(
     with LazyLogging {
 
   // Loops require materialized edges to carry state between iterations.
-  // Previously we silently rewrote the user's execution mode to
-  // MATERIALIZED here, but that left the UI displaying the user's
-  // original (e.g. PIPELINED) choice while the engine ran something
-  // else -- the user had no way to tell the two had diverged. Fail
-  // loudly instead: surface a fatal error with an actionable message so
-  // the user can update the workflow setting and re-run.
-  if (
-    request.logicalPlan.operators.exists(_.isInstanceOf[LoopStartOpDesc])
-    && request.workflowSettings.executionMode != ExecutionMode.MATERIALIZED
-  ) {
-    throw new IllegalArgumentException(
-      "This workflow contains loop operators (Loop Start / Loop End), which require " +
-        "the execution mode to be MATERIALIZED. Please open Workflow Settings → " +
-        "Execution Mode, change it to Materialized, and re-run."
-    )
-  }
-  workflowContext.workflowSettings = request.workflowSettings
+  // The frontend's Settings panel already detects loop operators and
+  // forces the radio button to MATERIALIZED (see
+  // `frontend/.../left-panel/settings/settings.component.ts`), so under
+  // normal use this coercion is a no-op. We keep it on the server side
+  // as a safety net for callers that bypass the frontend (e.g. direct
+  // API submissions or older clients): rather than failing the run,
+  // silently coerce so the user gets a successful execution. Because
+  // the frontend mirrors this rule, UI and engine cannot disagree.
+  workflowContext.workflowSettings =
+    if (request.logicalPlan.operators.exists(_.isInstanceOf[LoopStartOpDesc])) {
+      request.workflowSettings.copy(executionMode = ExecutionMode.MATERIALIZED)
+    } else {
+      request.workflowSettings
+    }
   val wsInput = new WebsocketInput(errorHandler)
 
   addSubscription(

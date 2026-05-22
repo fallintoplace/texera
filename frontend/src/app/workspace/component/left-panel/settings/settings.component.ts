@@ -28,6 +28,13 @@ import { ExecutionMode } from "../../../../common/type/workflow";
 import { NzRadioGroupComponent, NzRadioComponent } from "ng-zorro-antd/radio";
 import { NgClass, NgIf } from "@angular/common";
 
+// Operator types (LogicalOp Jackson names) that require the workflow to
+// run in MATERIALIZED mode. The matching source-of-truth on the server
+// is `LoopStartOpDesc` / `LoopEndOpDesc` registered in `LogicalOp.scala`,
+// and WorkflowExecutionService coerces to MATERIALIZED on its end as a
+// safety net for non-frontend clients.
+const LOOP_OPERATOR_TYPES = ["LoopStart", "LoopEnd"] as const;
+
 @UntilDestroy()
 @Component({
   selector: "texera-settings",
@@ -37,6 +44,11 @@ import { NgClass, NgIf } from "@angular/common";
 })
 export class SettingsComponent implements OnInit {
   settingsForm: FormGroup;
+
+  /** True iff the current workflow contains a Loop Start / Loop End
+   * operator. When true, executionMode is forced to MATERIALIZED and the
+   * radio group is disabled so the UI and the engine can't disagree. */
+  hasLoopOperator = false;
 
   constructor(
     private fb: FormBuilder,
@@ -71,10 +83,15 @@ export class SettingsComponent implements OnInit {
         this.updateExecutionMode(mode);
       });
 
+    // Apply once on load so a workflow opened with a pre-existing loop
+    // is coerced before the user ever sees the wrong mode.
+    this.syncExecutionModeForLoopOperators();
+
     this.workflowActionService
       .workflowChanged()
       .pipe(untilDestroyed(this))
       .subscribe(() => {
+        this.syncExecutionModeForLoopOperators();
         this.settingsForm.patchValue(
           {
             dataTransferBatchSize: this.workflowActionService.getWorkflowContent().settings.dataTransferBatchSize,
@@ -83,6 +100,44 @@ export class SettingsComponent implements OnInit {
           { emitEvent: false }
         );
       });
+  }
+
+  /** Inspect the current workflow for loop operators. If any are present,
+   * force executionMode to MATERIALIZED and disable the radio group so the
+   * UI shows the same value the engine will actually run on (which the
+   * server-side `WorkflowExecutionService` coerces independently as a
+   * safety net). If none are present, re-enable the radio group. */
+  private syncExecutionModeForLoopOperators(): void {
+    const operators = this.workflowActionService.getTexeraGraph().getAllOperators();
+    const hadLoop = this.hasLoopOperator;
+    this.hasLoopOperator = operators.some(op => (LOOP_OPERATOR_TYPES as readonly string[]).includes(op.operatorType));
+
+    const currentMode = this.workflowActionService.getWorkflowContent().settings.executionMode;
+    if (this.hasLoopOperator && currentMode !== ExecutionMode.MATERIALIZED) {
+      // Update the workflow setting; the next workflowChanged pass-through
+      // patches the form to match.
+      this.workflowActionService.updateExecutionMode(ExecutionMode.MATERIALIZED);
+    }
+
+    const executionModeCtrl = this.settingsForm.get("executionMode");
+    if (executionModeCtrl !== null) {
+      if (this.hasLoopOperator && !executionModeCtrl.disabled) {
+        executionModeCtrl.disable({ emitEvent: false });
+      } else if (!this.hasLoopOperator && executionModeCtrl.disabled) {
+        executionModeCtrl.enable({ emitEvent: false });
+      }
+    }
+
+    // First time we just discovered a loop in a workflow that was loaded
+    // with PIPELINED -- surface a toast so the user understands why the
+    // UI suddenly switched modes on them. Subsequent re-checks (form
+    // patches, position changes, etc.) won't re-notify because hadLoop
+    // is now true.
+    if (this.hasLoopOperator && !hadLoop && currentMode !== ExecutionMode.MATERIALIZED) {
+      this.notificationService.info(
+        "Execution mode set to Materialized because this workflow contains loop operators."
+      );
+    }
   }
 
   public confirmUpdateDataTransferBatchSize(dataTransferBatchSize: number): void {

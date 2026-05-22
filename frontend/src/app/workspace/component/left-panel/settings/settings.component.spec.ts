@@ -41,6 +41,7 @@ class StubWorkflowActionService {
     dataTransferBatchSize: 100,
     executionMode: ExecutionMode.PIPELINED,
   };
+  private operators: { operatorType: string }[] = [];
   private workflowChangedSubject = new Subject<unknown>();
 
   getWorkflowSettings(): WorkflowSettings {
@@ -68,6 +69,21 @@ class StubWorkflowActionService {
   workflowChanged(): Observable<unknown> {
     return this.workflowChangedSubject.asObservable();
   }
+
+  // SettingsComponent inspects the graph to decide whether the workflow
+  // contains loop operators. Expose a minimal stub that returns whatever
+  // a test has staged via `setOperators`.
+  getTexeraGraph(): { getAllOperators: () => { operatorType: string }[] } {
+    return { getAllOperators: () => this.operators };
+  }
+
+  setOperators(ops: { operatorType: string }[]): void {
+    this.operators = ops;
+  }
+
+  fireWorkflowChanged(): void {
+    this.workflowChangedSubject.next(undefined);
+  }
 }
 
 describe("SettingsComponent", () => {
@@ -76,11 +92,11 @@ describe("SettingsComponent", () => {
   let workflowActionService: StubWorkflowActionService;
   let userService: StubUserService;
   let workflowPersistSpy: { persistWorkflow: ReturnType<typeof vi.fn> };
-  let notificationSpy: { error: ReturnType<typeof vi.fn> };
+  let notificationSpy: { error: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     workflowPersistSpy = { persistWorkflow: vi.fn().mockReturnValue(of({})) };
-    notificationSpy = { error: vi.fn() };
+    notificationSpy = { error: vi.fn(), info: vi.fn() };
 
     await TestBed.configureTestingModule({
       providers: [
@@ -186,5 +202,73 @@ describe("SettingsComponent", () => {
     component.settingsForm.get("dataTransferBatchSize")!.setValue(-5);
 
     expect(setBatchSizeSpy).not.toHaveBeenCalled();
+  });
+
+  // ---- Loop-aware execution mode coercion -------------------------------
+  //
+  // SettingsComponent must keep the UI and the engine in agreement: a
+  // workflow containing Loop Start / Loop End operators always runs in
+  // MATERIALIZED mode (server enforces this too). The component coerces
+  // the form value, disables the radio group, and shows a one-shot
+  // notification when it has to flip the user's selection.
+
+  it("should coerce executionMode to MATERIALIZED and disable the radio group when a LoopStart appears", () => {
+    workflowActionService.setOperators([{ operatorType: "LoopStart" }]);
+    workflowActionService.fireWorkflowChanged();
+
+    const ctrl = component.settingsForm.get("executionMode")!;
+    expect(component.hasLoopOperator).toBe(true);
+    expect(workflowActionService.getWorkflowSettings().executionMode).toBe(ExecutionMode.MATERIALIZED);
+    expect(ctrl.disabled).toBe(true);
+  });
+
+  it("should also trigger on LoopEnd presence, not only LoopStart", () => {
+    workflowActionService.setOperators([{ operatorType: "LoopEnd" }]);
+    workflowActionService.fireWorkflowChanged();
+
+    expect(component.hasLoopOperator).toBe(true);
+    expect(workflowActionService.getWorkflowSettings().executionMode).toBe(ExecutionMode.MATERIALIZED);
+  });
+
+  it("should re-enable the radio group when the last loop operator is removed", () => {
+    workflowActionService.setOperators([{ operatorType: "LoopStart" }]);
+    workflowActionService.fireWorkflowChanged();
+    expect(component.settingsForm.get("executionMode")!.disabled).toBe(true);
+
+    workflowActionService.setOperators([]);
+    workflowActionService.fireWorkflowChanged();
+
+    expect(component.hasLoopOperator).toBe(false);
+    expect(component.settingsForm.get("executionMode")!.disabled).toBe(false);
+  });
+
+  it("should surface an info notification exactly once when coercing PIPELINED → MATERIALIZED", () => {
+    workflowActionService.setOperators([{ operatorType: "LoopStart" }]);
+    workflowActionService.fireWorkflowChanged();
+    // Subsequent workflow-changed events that don't change the loop-status
+    // must not re-notify (otherwise we'd spam the user on every position
+    // change / link add).
+    workflowActionService.fireWorkflowChanged();
+    workflowActionService.fireWorkflowChanged();
+
+    expect(notificationSpy.info).toHaveBeenCalledTimes(1);
+  });
+
+  it("should not notify when a workflow opens already in MATERIALIZED mode with a loop", () => {
+    workflowActionService.updateExecutionMode(ExecutionMode.MATERIALIZED);
+    workflowActionService.setOperators([{ operatorType: "LoopStart" }]);
+    workflowActionService.fireWorkflowChanged();
+
+    expect(component.hasLoopOperator).toBe(true);
+    expect(notificationSpy.info).not.toHaveBeenCalled();
+  });
+
+  it("should leave executionMode alone when no loop operator is present", () => {
+    workflowActionService.setOperators([{ operatorType: "CSVFileScan" }]);
+    workflowActionService.fireWorkflowChanged();
+
+    expect(component.hasLoopOperator).toBe(false);
+    expect(workflowActionService.getWorkflowSettings().executionMode).toBe(ExecutionMode.PIPELINED);
+    expect(component.settingsForm.get("executionMode")!.disabled).toBe(false);
   });
 });

@@ -34,6 +34,11 @@
         >Materialized</label
       >
     </nz-radio-group>
+    <div
+      *ngIf="hasLoopOperator"
+      class="loop-mode-note">
+      Materialized is required when the workflow contains Loop Start / Loop End operators.
+    </div>
     <br />
     <div class="form-group">
       <label for="dataTransferBatchSize">Data Transfer Batch Size:</label>
